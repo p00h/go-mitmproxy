@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,7 +33,7 @@ func testSendRequest(t *testing.T, endpoint string, client *http.Client, bodyWan
 	resp, err := client.Do(req)
 	handleError(t, err)
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	handleError(t, err)
 	if string(body) != bodyWant {
 		t.Fatalf("expected %s, but got %s", bodyWant, body)

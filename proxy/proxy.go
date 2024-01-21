@@ -3,12 +3,13 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+
+	reqclient "github.com/imroc/req/v3"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -27,7 +28,7 @@ type Proxy struct {
 	Version string
 	Addons  []Addon
 
-	client          *http.Client
+	client          *MyClient
 	server          *http.Server
 	interceptor     *middle
 	shouldIntercept func(req *http.Request) bool              // req is received by proxy.server
@@ -48,21 +49,7 @@ func NewProxy(opts *Options) (*Proxy, error) {
 		Addons:  make([]Addon, 0),
 	}
 
-	proxy.client = &http.Client{
-		Transport: &http.Transport{
-			Proxy:              proxy.realUpstreamProxy(),
-			ForceAttemptHTTP2:  false, // disable http2
-			DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: opts.SslInsecure,
-				KeyLogWriter:       getTlsKeyLogWriter(),
-			},
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// 禁止自动重定向
-			return http.ErrUseLastResponse
-		},
-	}
+	proxy.client = NewMyClient(opts.Debug)
 
 	proxy.server = &http.Server{
 		Addr:    opts.Addr,
@@ -261,10 +248,12 @@ func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	var proxyRes *http.Response
+	var proxyRes *reqclient.Response
+
 	if useSeparateClient {
 		proxyRes, err = proxy.client.Do(proxyReq)
 	} else {
+		// proxyRes, err = f.ConnContext.ServerConn.client.Do(proxyReq)
 		proxyRes, err = f.ConnContext.ServerConn.client.Do(proxyReq)
 	}
 	if err != nil {

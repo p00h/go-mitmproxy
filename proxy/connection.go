@@ -7,15 +7,85 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/imroc/req/v3"
+
 	uuid "github.com/satori/go.uuid"
 	log "github.com/sirupsen/logrus"
 )
+
+type MyClient struct {
+	client *req.Client
+}
+
+func NewMyClient(debug int) *MyClient {
+	c := &MyClient{
+		client: newReqClient(debug),
+	}
+
+	return c
+}
+
+func (c *MyClient) Do(r *http.Request) (*req.Response, error) {
+	strUrl := r.URL.String()
+	request := c.client.R()
+
+	for _, cookie := range r.Cookies() {
+		request.SetCookies(cookie)
+	}
+
+	for key, value := range r.Header {
+		for _, v := range value {
+			request.SetHeader(key, v)
+		}
+	}
+
+	if r.Body != nil {
+		request.SetBody(r.Body)
+	}
+
+	if r.Method == "GET" {
+		return request.Get(strUrl)
+	}
+
+	if r.Method == "POST" {
+		return request.Post(strUrl)
+	}
+
+	if r.Method == "PUT" {
+		return request.Put(strUrl)
+	}
+
+	if r.Method == "PATCH" {
+		return request.Patch(strUrl)
+	}
+
+	if r.Method == "DELETE" {
+		return request.Delete(strUrl)
+	}
+
+	return nil, fmt.Errorf("No handler for %s method", r.Method)
+}
+
+func newReqClient(debug int) *req.Client {
+	client := req.C().
+		ImpersonateChrome()
+
+	client.SetRedirectPolicy(req.NoRedirectPolicy())
+
+	if debug > 0 {
+		client.EnableDebugLog()
+		// EnableDumpAll().
+	}
+
+	return client
+}
 
 // client connection
 type ClientConn struct {
@@ -31,7 +101,7 @@ func newClientConn(c net.Conn) *ClientConn {
 		Id:           uuid.NewV4(),
 		Conn:         c,
 		Tls:          false,
-		UpstreamCert: true,
+		UpstreamCert: false,
 	}
 }
 
@@ -53,7 +123,7 @@ type ServerConn struct {
 	tlsHandshakeErr error
 	tlsConn         *tls.Conn
 	tlsState        *tls.ConnectionState
-	client          *http.Client
+	client          *MyClient
 }
 
 func newServerConn() *ServerConn {
@@ -116,40 +186,7 @@ func (connCtx *ConnContext) initHttpServerConn() {
 	}
 
 	serverConn := newServerConn()
-	serverConn.client = &http.Client{
-		Transport: &http.Transport{
-			Proxy: connCtx.proxy.realUpstreamProxy(),
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
-				if err != nil {
-					return nil, err
-				}
-				cw := &wrapServerConn{
-					Conn:    c,
-					proxy:   connCtx.proxy,
-					connCtx: connCtx,
-				}
-				serverConn.Conn = cw
-				serverConn.Address = addr
-				defer func() {
-					for _, addon := range connCtx.proxy.Addons {
-						addon.ServerConnected(connCtx)
-					}
-				}()
-				return cw, nil
-			},
-			ForceAttemptHTTP2:  false, // disable http2
-			DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: connCtx.proxy.Opts.SslInsecure,
-				KeyLogWriter:       getTlsKeyLogWriter(),
-			},
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// 禁止自动重定向
-			return http.ErrUseLastResponse
-		},
-	}
+	serverConn.client = NewMyClient(connCtx.proxy.Opts.Debug)
 	connCtx.ServerConn = serverConn
 }
 
@@ -181,65 +218,12 @@ func (connCtx *ConnContext) initHttpsServerConn() {
 		return
 	}
 
+	log.Debugf("UpstreamCert=%t\n", connCtx.ClientConn.UpstreamCert)
 	if connCtx.ClientConn.UpstreamCert {
-		connCtx.ServerConn.client = &http.Client{
-			Transport: &http.Transport{
-				DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					<-connCtx.ServerConn.tlsHandshaked
-					return connCtx.ServerConn.tlsConn, connCtx.ServerConn.tlsHandshakeErr
-				},
-				ForceAttemptHTTP2:  false, // disable http2
-				DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				// 禁止自动重定向
-				return http.ErrUseLastResponse
-			},
-		}
+		connCtx.ServerConn.client = NewMyClient(connCtx.proxy.Opts.Debug)
 	} else {
 		serverConn := newServerConn()
-		serverConn.client = &http.Client{
-			Transport: &http.Transport{
-				Proxy: connCtx.proxy.realUpstreamProxy(),
-				DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
-					if err != nil {
-						return nil, err
-					}
-					cw := &wrapServerConn{
-						Conn:    c,
-						proxy:   connCtx.proxy,
-						connCtx: connCtx,
-					}
-					serverConn.Conn = cw
-					serverConn.Address = addr
-
-					for _, addon := range connCtx.proxy.Addons {
-						addon.ServerConnected(connCtx)
-					}
-
-					if err := connCtx.tlsHandshake(connCtx.ClientConn.clientHello); err != nil {
-						return nil, err
-					}
-
-					for _, addon := range connCtx.proxy.Addons {
-						addon.TlsEstablishedServer(connCtx)
-					}
-
-					return serverConn.tlsConn, nil
-				},
-				ForceAttemptHTTP2:  false, // disable http2
-				DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: connCtx.proxy.Opts.SslInsecure,
-					KeyLogWriter:       getTlsKeyLogWriter(),
-				},
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				// 禁止自动重定向
-				return http.ErrUseLastResponse
-			},
-		}
+		serverConn.client = NewMyClient(connCtx.proxy.Opts.Debug)
 		connCtx.ServerConn = serverConn
 	}
 }
