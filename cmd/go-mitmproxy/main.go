@@ -41,13 +41,18 @@ func main() {
 	} else {
 		log.SetLevel(log.InfoLevel)
 	}
+
 	if config.Debug == 2 {
 		log.SetReportCaller(true)
 	}
 	log.SetOutput(os.Stdout)
-	log.SetFormatter(&log.TextFormatter{
+
+	// Formatter
+	formatter := &log.TextFormatter{
 		FullTimestamp: true,
-	})
+	}
+	formatter.TimestampFormat = "02.01.2006 15:04:05"
+	log.SetFormatter(formatter)
 
 	opts := &proxy.Options{
 		Debug:             config.Debug,
